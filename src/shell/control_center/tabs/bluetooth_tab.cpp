@@ -123,6 +123,10 @@ namespace {
   // Minimum spacing between rebuilds caused only by Available devices appearing or vanishing.
   constexpr auto kAvailableRebuildInterval = std::chrono::milliseconds(2000);
 
+  // Splits the structure key before the Available section. D-Bus strings cannot hold NUL,
+  // so no device path or alias can contain it.
+  constexpr char kAvailableKeySeparator = '\0';
+
   std::unique_ptr<Flex> makeMetricPill(const char* glyphName, std::string text, float scale, Label** valueOut) {
     return ui::row(
         {.align = FlexAlign::Center, .gap = Style::spaceXs * 0.5F * scale},
@@ -738,10 +742,10 @@ void BluetoothTab::syncPairingCard() {
 // they refresh in place through syncDeviceRows(), so an advertisement no longer tears
 // down the list. Devices arrive sorted, so a change in row order changes the key.
 // Discovering is absent too: the scan spinner lives in the persistent adapter card.
-// Available devices come last, after a '#', so callers can tell scan churn apart.
+// Available devices come last, after kAvailableKeySeparator, so callers can tell scan churn apart.
 std::string BluetoothTab::structureKey(const std::vector<BluetoothDeviceInfo>& devices) const {
   if (m_service == nullptr) {
-    return "empty#";
+    return std::string("empty") + kAvailableKeySeparator;
   }
   const auto& s = m_service->state();
   std::string key;
@@ -753,7 +757,7 @@ std::string BluetoothTab::structureKey(const std::vector<BluetoothDeviceInfo>& d
   for (const auto& d : devices) {
     const bool available = bucketFor(d) == DeviceBucket::Available;
     if (available && !inAvailable) {
-      key.push_back('#');
+      key.push_back(kAvailableKeySeparator);
       inAvailable = true;
     }
     key += d.path;
@@ -772,7 +776,7 @@ std::string BluetoothTab::structureKey(const std::vector<BluetoothDeviceInfo>& d
     key.push_back('\n');
   }
   if (!inAvailable) {
-    key.push_back('#');
+    key.push_back(kAvailableKeySeparator);
   }
   return key;
 }
@@ -829,14 +833,15 @@ void BluetoothTab::rebuildDeviceList(Renderer& renderer) {
   // so the list settles instead of flashing on every advertisement.
   const auto now = std::chrono::steady_clock::now();
   if (structureChanged && listWidth == m_lastListWidth) {
-    const auto pinned = [](const std::string& key) { return std::string_view(key).substr(0, key.find('#')); };
+    const auto pinned = [](const std::string& key) {
+      return std::string_view(key).substr(0, key.find(kAvailableKeySeparator));
+    };
     const auto sinceLast = now - m_lastRebuildAt;
     if (pinned(nextKey) == pinned(m_lastStructureKey) && sinceLast < kAvailableRebuildInterval) {
       if (!m_rebuildTimer.active()) {
-        m_rebuildTimer.start(
-            std::chrono::duration_cast<std::chrono::milliseconds>(kAvailableRebuildInterval - sinceLast),
-            [] { PanelManager::instance().refresh(); }
-        );
+        m_rebuildTimer.start(std::chrono::ceil<std::chrono::milliseconds>(kAvailableRebuildInterval - sinceLast), [] {
+          PanelManager::instance().refresh();
+        });
       }
       return;
     }
